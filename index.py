@@ -111,13 +111,16 @@ class FrameExtractorApp(tk.Tk):
 			messagebox.showwarning("Folder not found", "The output folder does not exist yet.")
 			return
 
+		self._open_folder_path(str(output_path))
+
+	def _open_folder_path(self, path: str) -> None:
 		try:
 			if os.name == "nt":
-				os.startfile(str(output_path))
+				os.startfile(path)
 			elif shutil.which("open"):
-				subprocess.Popen(["open", str(output_path)])
+				subprocess.Popen(["open", path])
 			else:
-				subprocess.Popen(["xdg-open", str(output_path)])
+				subprocess.Popen(["xdg-open", path])
 		except Exception as exc:
 			messagebox.showerror("Open folder failed", str(exc))
 
@@ -204,12 +207,25 @@ class FrameExtractorApp(tk.Tk):
 		self.progress.pack_forget()
 		self.status_text.set(message)
 
+		# Prompt user on completion with option to open folder
+		output = self.output_dir.get().strip()
+		try:
+			open_now = messagebox.askyesno(
+				"Extraction complete",
+				f"Extraction complete.\n\nOpen output folder?\n{output}"
+			)
+			if open_now and output:
+				self._open_folder_path(output)
+		except Exception:
+			# Fallback simple info dialog
+			messagebox.showinfo("Extraction complete", "Extraction complete.")
+
 	def _finish_with_error(self, error_message: str) -> None:
 		self.is_running = False
 		self.extract_button.config(state="normal")
 		self.progress.stop()
 		self.progress.pack_forget()
-		self.status_text.set(f"Extraction failed:\n{error_message}")
+		self.status_text.set(f"Extraction failed:{error_message}")
 		messagebox.showerror("Extraction failed", error_message)
 
 
