@@ -60,13 +60,14 @@ class FrameExtractorApp(tk.Tk):
 		button_row = ttk.Frame(container)
 		button_row.pack(fill="x", pady=(0, 10))
 
+		ttk.Button(button_row, text="Open Output Folder", command=self.open_output_folder).pack(side="left")
+
+		self.progress = ttk.Progressbar(button_row, mode="indeterminate", length=180)
+		self.progress.pack(side="right", padx=(0, 10))
+		self.progress.pack_forget()
+
 		self.extract_button = ttk.Button(button_row, text="Extract Frames", command=self.start_extraction)
-		self.extract_button.pack(side="left")
-
-		ttk.Button(button_row, text="Open Output Folder", command=self.open_output_folder).pack(side="left", padx=(8, 0))
-
-		self.progress = ttk.Progressbar(container, mode="indeterminate")
-		self.progress.pack(fill="x", pady=(0, 10))
+		self.extract_button.pack(side="right")
 
 		status_frame = ttk.LabelFrame(container, text="Status", padding=10)
 		status_frame.pack(fill="both", expand=True)
@@ -122,7 +123,6 @@ class FrameExtractorApp(tk.Tk):
 
 	def start_extraction(self) -> None:
 		if self.is_running:
-			print("Already extracting..")
 			return
 
 		video = self.video_path.get().strip()
@@ -151,6 +151,7 @@ class FrameExtractorApp(tk.Tk):
 
 		self.is_running = True
 		self.extract_button.config(state="disabled")
+		self.progress.pack(side="right", padx=(0, 10))
 		self.progress.start(10)
 		self.status_text.set("Extracting frames…")
 
@@ -200,12 +201,14 @@ class FrameExtractorApp(tk.Tk):
 		self.is_running = False
 		self.extract_button.config(state="normal")
 		self.progress.stop()
+		self.progress.pack_forget()
 		self.status_text.set(message)
 
 	def _finish_with_error(self, error_message: str) -> None:
 		self.is_running = False
 		self.extract_button.config(state="normal")
 		self.progress.stop()
+		self.progress.pack_forget()
 		self.status_text.set(f"Extraction failed:\n{error_message}")
 		messagebox.showerror("Extraction failed", error_message)
 
