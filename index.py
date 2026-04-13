@@ -10,7 +10,7 @@ from tkinter import filedialog, messagebox, ttk
 class FrameExtractorApp(tk.Tk):
 	def __init__(self) -> None:
 		super().__init__()
-		self.title("GoPro 360 Frame Extractor")
+		self.title("Action Camera Timelapse Photo Extractor")
 		self.geometry("720x430")
 		self.minsize(680, 400)
 
@@ -18,7 +18,7 @@ class FrameExtractorApp(tk.Tk):
 		self.output_dir = tk.StringVar()
 		self.prefix = tk.StringVar(value="frame")
 		self.quality = tk.IntVar(value=2)  # 2 = high quality for ffmpeg MJPEG
-		self.status_text = tk.StringVar(value="Select a GoPro 360 video file to begin.")
+		self.status_text = tk.StringVar(value="Select a action camera (ex. GoPro 360) video file to begin.")
 		self.is_running = False
 
 		self._build_ui()
@@ -28,7 +28,7 @@ class FrameExtractorApp(tk.Tk):
 		container = ttk.Frame(self, padding=14)
 		container.pack(fill="both", expand=True)
 
-		ttk.Label(container, text="GoPro 360 Video → JPEG Frames", font=("TkDefaultFont", 14, "bold")).pack(anchor="w", pady=(0, 12))
+		ttk.Label(container, text="Action Camera Video → JPEG Frames", font=("TkDefaultFont", 14, "bold")).pack(anchor="w", pady=(0, 12))
 
 		file_frame = ttk.LabelFrame(container, text="Input Video", padding=10)
 		file_frame.pack(fill="x", pady=(0, 10))
@@ -80,7 +80,7 @@ class FrameExtractorApp(tk.Tk):
 
 	def choose_video(self) -> None:
 		file_path = filedialog.askopenfilename(
-			title="Choose a GoPro video",
+			title="Choose a action camera video",
 			filetypes=[
 				("Video files", "*.mp4 *.mov *.mkv *.360"),
 				("All files", "*.*"),
