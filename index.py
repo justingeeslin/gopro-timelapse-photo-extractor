@@ -2,6 +2,8 @@ import os
 import threading
 import subprocess
 import shutil
+import json
+from datetime import datetime, timedelta
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -124,6 +126,101 @@ class FrameExtractorApp(tk.Tk):
 		except Exception as exc:
 			messagebox.showerror("Open folder failed", str(exc))
 
+	def _get_video_start_datetime(self, video_path: Path) -> datetime:
+		cmd = [
+			"ffprobe",
+			"-v", "error",
+			"-show_entries", "format_tags=creation_time:stream_tags=creation_time",
+			"-of", "json",
+			str(video_path),
+		]
+		result = subprocess.run(cmd, capture_output=True, text=True)
+		if result.returncode != 0:
+			raise RuntimeError(result.stderr.strip() or "Could not read video metadata")
+
+		data = json.loads(result.stdout)
+
+		creation_time = None
+
+		format_tags = data.get("format", {}).get("tags", {})
+		creation_time = format_tags.get("creation_time")
+
+		if not creation_time:
+			for stream in data.get("streams", []):
+				stream_tags = stream.get("tags", {})
+				if "creation_time" in stream_tags:
+					creation_time = stream_tags["creation_time"]
+					break
+
+		if not creation_time:
+			raise RuntimeError(
+				"No creation_time metadata found in the video. "
+				"Cannot determine when the frames were captured."
+			)
+
+		creation_time = creation_time.replace("Z", "+00:00")
+		dt = datetime.fromisoformat(creation_time)
+
+		if dt.tzinfo is not None:
+			dt = dt.astimezone().replace(tzinfo=None)
+
+		return dt
+
+	def _get_video_fps(self, video_path: Path) -> float:
+		cmd = [
+			"ffprobe",
+			"-v", "error",
+			"-select_streams", "v:0",
+			"-show_entries", "stream=r_frame_rate",
+			"-of", "json",
+			str(video_path),
+		]
+		result = subprocess.run(cmd, capture_output=True, text=True)
+		if result.returncode != 0:
+			raise RuntimeError(result.stderr.strip() or "Could not determine video FPS")
+
+		data = json.loads(result.stdout)
+		streams = data.get("streams", [])
+		if not streams:
+			raise RuntimeError("No video stream found")
+
+		rate = streams[0].get("r_frame_rate", "0/0")
+		num_str, den_str = rate.split("/")
+		num = float(num_str)
+		den = float(den_str)
+		if den == 0:
+			raise RuntimeError("Invalid FPS reported by ffprobe")
+
+		return num / den
+
+	def _format_exif_datetime(self, dt: datetime) -> str:
+		return dt.strftime("%Y:%m:%d %H:%M:%S")
+
+	def _write_exif_timestamps(self, output_dir: Path, prefix: str, start_dt: datetime, fps: float) -> None:
+		frame_files = sorted(output_dir.glob(f"{prefix}_*.jpg"))
+		if not frame_files:
+			return
+
+		for i, frame_file in enumerate(frame_files, start=1):
+			seconds_offset = (i - 1) / fps
+			frame_dt = start_dt + timedelta(seconds=seconds_offset)
+			exif_dt = self._format_exif_datetime(frame_dt)
+
+			cmd = [
+				"exiftool",
+				"-overwrite_original",
+				f"-DateTimeOriginal={exif_dt}",
+				f"-CreateDate={exif_dt}",
+				f"-ModifyDate={exif_dt}",
+				str(frame_file),
+			]
+			result = subprocess.run(cmd, capture_output=True, text=True)
+			if result.returncode != 0:
+				raise RuntimeError(
+					f"Failed to write EXIF for {frame_file.name}: "
+					f"{result.stderr.strip() or result.stdout.strip()}"
+				)
+
 	def start_extraction(self) -> None:
 		if self.is_running:
 			return
@@ -151,12 +248,26 @@ class FrameExtractorApp(tk.Tk):
 				"Install it first, then reopen this app."
 			)
 			return
+		if shutil.which("ffprobe") is None:
+			messagebox.showerror(
+				"ffprobe not found",
+				"ffprobe is required but was not found on your PATH.\n\n"
+				"Install ffmpeg/ffprobe, then reopen this app."
+			)
+			return
+		if shutil.which("exiftool") is None:
+			messagebox.showerror(
+				"exiftool not found",
+				"exiftool is required to write photo timestamps.\n\n"
+				"Install it first, then reopen this app."
+			)
+			return
 
 		self.is_running = True
 		self.extract_button.config(state="disabled")
 		self.progress.pack(side="right", padx=(0, 10))
 		self.progress.start(10)
-		self.status_text.set("Extracting frames…")
+		self.status_text.set("Extracting frames and writing EXIF timestamps…")
 
 		thread = threading.Thread(target=self._extract_frames_worker, daemon=True)
 		thread.start()
@@ -169,6 +280,9 @@ class FrameExtractorApp(tk.Tk):
 
 		try:
 			output.mkdir(parents=True, exist_ok=True)
+
+			start_dt = self._get_video_start_datetime(video)
+			fps = self._get_video_fps(video)
 
 			output_pattern = output / f"{prefix}_%06d.jpg"
 			cmd = [
@@ -191,9 +305,13 @@ class FrameExtractorApp(tk.Tk):
 				self.after(0, self._finish_with_error, error_text)
 				return
 
+			self._write_exif_timestamps(output, prefix, start_dt, fps)
+
 			frame_count = len(list(output.glob(f"{prefix}_*.jpg")))
 			message = (
 				f"Done. Extracted {frame_count} JPEG frame(s) to:\n{output}\n\n"
+				f"Photo start time: {self._format_exif_datetime(start_dt)}\n"
+				f"FPS used for timestamps: {fps:.6f}\n"
 				f"Pattern: {prefix}_000001.jpg"
 			)
 			self.after(0, self._finish_success, message)
@@ -207,7 +325,6 @@ class FrameExtractorApp(tk.Tk):
 		self.progress.pack_forget()
 		self.status_text.set(message)
 
-		# Prompt user on completion with option to open folder
 		output = self.output_dir.get().strip()
 		try:
 			open_now = messagebox.askyesno(
@@ -217,7 +334,6 @@ class FrameExtractorApp(tk.Tk):
 			if open_now and output:
 				self._open_folder_path(output)
 		except Exception:
-			# Fallback simple info dialog
 			messagebox.showinfo("Extraction complete", "Extraction complete.")
 
 	def _finish_with_error(self, error_message: str) -> None:
@@ -225,7 +341,7 @@ class FrameExtractorApp(tk.Tk):
 		self.extract_button.config(state="normal")
 		self.progress.stop()
 		self.progress.pack_forget()
-		self.status_text.set(f"Extraction failed:{error_message}")
+		self.status_text.set(f"Extraction failed: {error_message}")
 		messagebox.showerror("Extraction failed", error_message)
 
 
