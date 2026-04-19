@@ -47,30 +47,6 @@ class FrameExtractorApp(tk.Tk):
 		)
 		ttk.Button(input_frame, text="Browse…", command=self.choose_input_dir).pack(side="left")
 
-		options = ttk.LabelFrame(container, text="Options", padding=10)
-		options.pack(fill="x", pady=(0, 10))
-
-		ttk.Label(options, text="Filename prefix:").grid(
-			row=0, column=0, sticky="w", padx=(0, 8), pady=4
-		)
-		ttk.Entry(options, textvariable=self.prefix, width=18).grid(
-			row=0, column=1, sticky="w", pady=4
-		)
-
-		ttk.Label(options, text="JPEG quality (2=best, 31=lowest):").grid(
-			row=1, column=0, sticky="w", padx=(0, 8), pady=4
-		)
-		ttk.Spinbox(options, from_=2, to=31, textvariable=self.quality, width=8).grid(
-			row=1, column=1, sticky="w", pady=4
-		)
-
-		ttk.Label(options, text="Capture interval (seconds):").grid(
-			row=2, column=0, sticky="w", padx=(0, 8), pady=4
-		)
-		ttk.Entry(options, textvariable=self.capture_interval, width=8).grid(
-			row=2, column=1, sticky="w", pady=4
-		)
-
 		help_text = (
 			"This app scans a directory for action camera videos, extracts every frame as JPEG,\n"
 			"extracts GoPro telemetry to GPX, writes timestamps from the GPX master clock,\n"
@@ -329,17 +305,6 @@ class FrameExtractorApp(tk.Tk):
 
 		if not prefix:
 			messagebox.showwarning("Missing prefix", "Please provide a filename prefix.")
-			return
-
-		try:
-			capture_interval = float(self.capture_interval.get())
-			if capture_interval <= 0:
-				raise ValueError
-		except Exception:
-			messagebox.showwarning(
-				"Invalid capture interval",
-				"Capture interval must be a positive number.",
-			)
 			return
 
 		for tool_name, friendly_name in [
