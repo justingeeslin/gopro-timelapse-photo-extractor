@@ -7,7 +7,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from pathlib import Path
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, ttk, scrolledtext
 
 
 class FrameExtractorApp(tk.Tk):
@@ -40,6 +40,17 @@ class FrameExtractorApp(tk.Tk):
 		self.immich_skip_hash = False
 
 		self._build_ui()
+		
+	def _log(self, message: str) -> None:
+		self.status_log.configure(state="normal")
+		self.status_log.insert("end", message + "\n")
+		self.status_log.see("end")
+		self.status_log.configure(state="disabled")
+	
+	def _clear_log(self) -> None:
+		self.status_log.configure(state="normal")
+		self.status_log.delete("1.0", "end")
+		self.status_log.configure(state="disabled")
 
 	def _build_ui(self) -> None:
 		container = ttk.Frame(self, padding=14)
@@ -119,22 +130,24 @@ class FrameExtractorApp(tk.Tk):
 		)
 		self.extract_button.pack(side="right")
 
-		status_frame = ttk.LabelFrame(container, text="Status", padding=10)
+		status_frame = ttk.LabelFrame(container, text="Status Log", padding=10)
 		status_frame.pack(fill="both", expand=True)
-
-		self.status_label = ttk.Label(
+		
+		self.status_log = scrolledtext.ScrolledText(
 			status_frame,
-			textvariable=self.status_text,
-			justify="left",
-			anchor="nw",
+			wrap="word",
+			height=14,
+			state="disabled",
 		)
-		self.status_label.pack(fill="both", expand=True)
+		self.status_log.pack(fill="both", expand=True)
+		
+		self._log("Select a directory containing action camera timelapse videos.")
 
 	def choose_input_dir(self) -> None:
 		directory = filedialog.askdirectory(title="Choose directory containing videos")
 		if directory:
 			self.input_dir.set(directory)
-			self.status_text.set(f"Selected input directory: {directory}")
+			self._log(f"Selected input directory: {directory}")
 
 	def open_output_folder(self) -> None:
 		if self.temp_root is None:
@@ -357,7 +370,7 @@ class FrameExtractorApp(tk.Tk):
 		quality = self.jpeg_quality
 		capture_interval_seconds = self.capture_interval_seconds
 
-		self.after(0, self.status_text.set, f"[{video.name}] Extracting frames…")
+		self.after(0, self._log, f"[{video.name}] Extracting frames…")
 
 		output_pattern = video_output_dir / f"{prefix}_%06d.jpg"
 		cmd = [
@@ -381,13 +394,13 @@ class FrameExtractorApp(tk.Tk):
 				f"{result.stderr.strip() or result.stdout.strip() or 'Unknown ffmpeg error'}"
 			)
 
-		self.after(0, self.status_text.set, f"[{video.name}] Extracting GPS track…")
+		self.after(0, self._log, f"[{video.name}] Extracting GPS track…")
 		gpx_path = self._extract_gpx_track(video, video_output_dir)
 
-		self.after(0, self.status_text.set, f"[{video.name}] Reading GPX start time…")
+		self.after(0, self._log, f"[{video.name}] Reading GPX start time…")
 		start_dt = self._get_gpx_start_datetime(gpx_path)
 
-		self.after(0, self.status_text.set, f"[{video.name}] Writing photo timestamps…")
+		self.after(0, self._log, f"[{video.name}] Writing photo timestamps…")
 		self._write_exif_timestamps(
 			video_output_dir,
 			prefix,
@@ -395,7 +408,7 @@ class FrameExtractorApp(tk.Tk):
 			capture_interval_seconds,
 		)
 
-		self.after(0, self.status_text.set, f"[{video.name}] Geotagging frames…")
+		self.after(0, self._log, f"[{video.name}] Geotagging frames…")
 		self._geotag_frames_with_gpx(video_output_dir, prefix, gpx_path)
 
 		frame_count = len(list(video_output_dir.glob(f"{prefix}_*.jpg")))
@@ -404,6 +417,8 @@ class FrameExtractorApp(tk.Tk):
 	def start_extraction(self) -> None:
 		if self.is_running:
 			return
+
+		self._clear_log()
 
 		input_dir_str = self.input_dir.get().strip()
 		prefix = self.prefix.get().strip()
@@ -457,7 +472,7 @@ class FrameExtractorApp(tk.Tk):
 		self.extract_button.config(state="disabled")
 		self.progress.pack(side="right", padx=(0, 10))
 		self.progress.start(10)
-		self.status_text.set(
+		self._log(
 			f"Found {len(video_files)} video(s). Processing into temporary folder:\n{self.temp_root}"
 		)
 
@@ -484,7 +499,7 @@ class FrameExtractorApp(tk.Tk):
 				video_output_dir = self.temp_root / video.stem
 				self.after(
 					0,
-					self.status_text.set,
+					self._log,
 					f"Processing video {idx} of {len(video_files)}:\n{video.name}",
 				)
 
@@ -497,7 +512,7 @@ class FrameExtractorApp(tk.Tk):
 				results.append((video.name, frame_count, video_output_dir))
 
 			if self.immich_enabled.get():
-				self.after(0, self.status_text.set, "Uploading processed photos to Immich…")
+				self.after(0, self._log, "Uploading processed photos to Immich…")
 				self._upload_to_immich(self.temp_root)
 
 			summary_lines = [
@@ -529,7 +544,7 @@ class FrameExtractorApp(tk.Tk):
 		self.extract_button.config(state="normal")
 		self.progress.stop()
 		self.progress.pack_forget()
-		self.status_text.set(message)
+		self._log(message)
 
 		output = str(self.temp_root) if self.temp_root else ""
 		try:
@@ -547,7 +562,7 @@ class FrameExtractorApp(tk.Tk):
 		self.extract_button.config(state="normal")
 		self.progress.stop()
 		self.progress.pack_forget()
-		self.status_text.set(f"Processing failed: {error_message}")
+		self._log(f"Processing failed: {error_message}")
 		messagebox.showerror("Processing failed", error_message)
 
 
