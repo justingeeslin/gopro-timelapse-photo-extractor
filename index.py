@@ -7,7 +7,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
-
+import xml.etree.ElementTree as ET
+from datetime import datetime, timedelta, timezone
 
 class FrameExtractorApp(tk.Tk):
 	def __init__(self) -> None:
@@ -163,8 +164,45 @@ class FrameExtractorApp(tk.Tk):
 		dt = datetime.fromisoformat(creation_time)
 
 		if dt.tzinfo is not None:
-			dt = dt.replace(tzinfo=None)
+			dt = dt.astimezone().replace(tzinfo=None)
 
+		return dt
+
+	def _get_gpx_start_datetime(self, gpx_path: Path) -> datetime:
+		try:
+			tree = ET.parse(gpx_path)
+			root = tree.getroot()
+		except Exception as exc:
+			raise RuntimeError(f"Failed to parse GPX file: {exc}")
+		
+		# GPX usually uses this namespace
+		ns = {"gpx": "http://www.topografix.com/GPX/1/1"}
+		
+		# Find the first track point time
+		time_elem = root.find(".//gpx:trkpt/gpx:time", ns)
+		
+		# Fallback in case namespace handling differs
+		if time_elem is None:
+			for elem in root.iter():
+				if elem.tag.endswith("time") and elem.text:
+					time_elem = elem
+					break
+		
+		if time_elem is None or not time_elem.text:
+			raise RuntimeError("No track timestamp found in GPX file")
+		
+		time_text = time_elem.text.strip()
+		
+		# Example: 2026-04-13T16:42:52.964Z
+		if time_text.endswith("Z"):
+			dt = datetime.fromisoformat(time_text.replace("Z", "+00:00"))
+		else:
+			dt = datetime.fromisoformat(time_text)
+		
+		# Convert UTC GPX time to local time, then drop tzinfo for EXIF
+		if dt.tzinfo is not None:
+			dt = dt.astimezone().replace(tzinfo=None)
+		
 		return dt
 
 	def _get_video_fps(self, video_path: Path) -> float:
@@ -197,6 +235,49 @@ class FrameExtractorApp(tk.Tk):
 	def _format_exif_datetime(self, dt: datetime) -> str:
 		return dt.strftime("%Y:%m:%d %H:%M:%S")
 
+	def _extract_gpx_track(self, video_path: Path, output_dir: Path) -> Path:
+		gpx_path = output_dir / "track.gpx"
+		
+		cmd = [
+			"exiftool",
+			"-ee",
+			"-p",
+			"gpx.fmt",
+			str(video_path),
+		]
+		
+		with open(gpx_path, "w", encoding="utf-8") as f:
+			result = subprocess.run(cmd, stdout=f, stderr=subprocess.PIPE, text=True)
+		
+		if result.returncode != 0:
+			raise RuntimeError(
+				result.stderr.strip() or "Failed to extract GPX track from video telemetry"
+			)
+		
+		if not gpx_path.exists() or gpx_path.stat().st_size == 0:
+			raise RuntimeError("GPX track extraction produced an empty file")
+		
+		return gpx_path
+	
+	def _geotag_frames_with_gpx(self, output_dir: Path, prefix: str, gpx_path: Path) -> None:
+		frame_files = sorted(output_dir.glob(f"{prefix}_*.jpg"))
+		if not frame_files:
+			return
+	
+		cmd = [
+			"exiftool",
+			"-overwrite_original",
+			f"-geotag={gpx_path}",
+			"-geotime<${DateTimeOriginal}",
+			*[str(frame_file) for frame_file in frame_files],
+		]
+	
+		result = subprocess.run(cmd, capture_output=True, text=True)
+		if result.returncode != 0:
+			raise RuntimeError(
+				result.stderr.strip() or result.stdout.strip() or "Failed to geotag frames from GPX"
+			)
+
 	def _write_exif_timestamps(
 		self,
 		output_dir: Path,
@@ -211,14 +292,19 @@ class FrameExtractorApp(tk.Tk):
 		for i, frame_file in enumerate(frame_files, start=1):
 			seconds_offset = (i - 1) * capture_interval_seconds
 			frame_dt = start_dt + timedelta(seconds=seconds_offset)
-			exif_dt = self._format_exif_datetime(frame_dt)
+	
+			exif_main = frame_dt.strftime("%Y:%m:%d %H:%M:%S")
+			subsec = f"{frame_dt.microsecond // 1000:03d}".rstrip("0") or "0"
 	
 			cmd = [
 				"exiftool",
 				"-overwrite_original",
-				f"-DateTimeOriginal={exif_dt}",
-				f"-CreateDate={exif_dt}",
-				f"-ModifyDate={exif_dt}",
+				f"-DateTimeOriginal={exif_main}",
+				f"-CreateDate={exif_main}",
+				f"-ModifyDate={exif_main}",
+				f"-SubSecTimeOriginal={subsec}",
+				f"-SubSecTimeDigitized={subsec}",
+				f"-SubSecTime={subsec}",
 				str(frame_file),
 			]
 			result = subprocess.run(cmd, capture_output=True, text=True)
@@ -288,8 +374,9 @@ class FrameExtractorApp(tk.Tk):
 		try:
 			output.mkdir(parents=True, exist_ok=True)
 		
-			start_dt = self._get_video_start_datetime(video)
 			capture_interval_seconds = 0.5
+		
+			self.after(0, self.status_text.set, "Extracting frames…")
 		
 			output_pattern = output / f"{prefix}_%06d.jpg"
 			cmd = [
@@ -312,11 +399,22 @@ class FrameExtractorApp(tk.Tk):
 				self.after(0, self._finish_with_error, error_text)
 				return
 		
+			self.after(0, self.status_text.set, "Extracting GPS track from GoPro telemetry…")
+			gpx_path = self._extract_gpx_track(video, output)
+		
+			self.after(0, self.status_text.set, "Reading first GPX timestamp…")
+			start_dt = self._get_gpx_start_datetime(gpx_path)
+		
+			self.after(0, self.status_text.set, "Writing photo timestamps from GPX master clock…")
 			self._write_exif_timestamps(output, prefix, start_dt, capture_interval_seconds)
+		
+			self.after(0, self.status_text.set, "Geotagging extracted frames…")
+			self._geotag_frames_with_gpx(output, prefix, gpx_path)
 		
 			frame_count = len(list(output.glob(f"{prefix}_*.jpg")))
 			message = (
 				f"Done. Extracted {frame_count} JPEG frame(s) to:\n{output}\n\n"
+				f"Master clock source: {gpx_path.name}\n"
 				f"Photo start time: {self._format_exif_datetime(start_dt)}\n"
 				f"Capture interval used for timestamps: {capture_interval_seconds:.3f} seconds\n"
 				f"Pattern: {prefix}_000001.jpg"
