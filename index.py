@@ -162,7 +162,7 @@ class FrameExtractorApp(tk.Tk):
 		dt = datetime.fromisoformat(creation_time)
 
 		if dt.tzinfo is not None:
-			dt = dt.astimezone().replace(tzinfo=None)
+			dt = dt.replace(tzinfo=None)
 
 		return dt
 
