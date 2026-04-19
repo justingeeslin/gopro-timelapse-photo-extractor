@@ -13,19 +13,31 @@ from tkinter import filedialog, messagebox, ttk
 class FrameExtractorApp(tk.Tk):
 	def __init__(self) -> None:
 		super().__init__()
-		self.title("Action Camera Timelapse Photo Extractor")
+		self.title("Action Camera Timelapse Batch Extractor")
 		self.geometry("760x460")
 		self.minsize(720, 420)
 
 		self.input_dir = tk.StringVar()
 		self.prefix = tk.StringVar(value="frame")
-		self.quality = tk.IntVar(value=2)
-		self.capture_interval = tk.DoubleVar(value=0.5)
 		self.status_text = tk.StringVar(
 			value="Select a directory containing action camera timelapse videos."
 		)
+
 		self.is_running = False
 		self.temp_root: Path | None = None
+
+		# Processing configuration
+		self.jpeg_quality = 2
+		self.capture_interval_seconds = 0.5
+
+		# Immich configuration
+		self.immich_enabled = True
+		self.immich_url = "http://localhost:2283/api"
+		self.immich_api_key = "pRGcu77MKZwFXlaGiggCSE1jzFleZywxjbsZtN7Pxs"
+		self.immich_auto_album = True
+		self.immich_album_name = ""
+		self.immich_upload_concurrency = 4
+		self.immich_skip_hash = False
 
 		self._build_ui()
 
@@ -47,10 +59,20 @@ class FrameExtractorApp(tk.Tk):
 		)
 		ttk.Button(input_frame, text="Browse…", command=self.choose_input_dir).pack(side="left")
 
+		options = ttk.LabelFrame(container, text="Options", padding=10)
+		options.pack(fill="x", pady=(0, 10))
+
+		ttk.Label(options, text="Filename prefix:").grid(
+			row=0, column=0, sticky="w", padx=(0, 8), pady=4
+		)
+		ttk.Entry(options, textvariable=self.prefix, width=18).grid(
+			row=0, column=1, sticky="w", pady=4
+		)
+
 		help_text = (
 			"This app scans a directory for action camera videos, extracts every frame as JPEG,\n"
-			"extracts GoPro telemetry to GPX, writes timestamps from the GPX master clock,\n"
-			"and geotags the frames. Output is written to a temporary directory."
+			"extracts GoPro telemetry to GPX, assigns timestamps using the GPX master clock,\n"
+			"geotags the frames, and uploads them to Immich."
 		)
 		ttk.Label(container, text=help_text, justify="left").pack(anchor="w", pady=(0, 10))
 
@@ -233,15 +255,58 @@ class FrameExtractorApp(tk.Tk):
 				or "Failed to geotag frames from GPX"
 			)
 
+	def _find_immich_cli(self) -> str | None:
+		return shutil.which("immich")
+
+	def _upload_to_immich(self, upload_root: Path) -> None:
+		if not self.immich_enabled:
+			return
+
+		immich_cli = self._find_immich_cli()
+		if immich_cli is None:
+			raise RuntimeError(
+				"Immich CLI not found. Install it with:\n\n"
+				"npm i -g @immich/cli"
+			)
+
+		cmd = [
+			immich_cli,
+			"-u", self.immich_url,
+			"-k", self.immich_api_key,
+			"upload",
+			"--recursive",
+			"-c", str(self.immich_upload_concurrency),
+			"--no-progress",
+		]
+
+		if self.immich_skip_hash:
+			cmd.append("--skip-hash")
+
+		if self.immich_album_name.strip():
+			cmd.extend(["--album-name", self.immich_album_name.strip()])
+		elif self.immich_auto_album:
+			cmd.append("--album")
+
+		cmd.append(str(upload_root))
+
+		result = subprocess.run(cmd, capture_output=True, text=True)
+		if result.returncode != 0:
+			raise RuntimeError(
+				result.stderr.strip()
+				or result.stdout.strip()
+				or "Immich upload failed"
+			)
+
 	def _process_single_video(
 		self,
 		video: Path,
 		video_output_dir: Path,
 		prefix: str,
-		quality: int,
-		capture_interval_seconds: float,
 	) -> int:
 		video_output_dir.mkdir(parents=True, exist_ok=True)
+
+		quality = self.jpeg_quality
+		capture_interval_seconds = self.capture_interval_seconds
 
 		self.after(0, self.status_text.set, f"[{video.name}] Extracting frames…")
 
@@ -320,6 +385,15 @@ class FrameExtractorApp(tk.Tk):
 				)
 				return
 
+		if self.immich_enabled and self._find_immich_cli() is None:
+			messagebox.showerror(
+				"Immich CLI not found",
+				"Immich upload is enabled, but the Immich CLI was not found.\n\n"
+				"Install it with:\n"
+				"npm i -g @immich/cli"
+			)
+			return
+
 		video_files = self._find_video_files(input_dir)
 		if not video_files:
 			messagebox.showwarning(
@@ -328,9 +402,7 @@ class FrameExtractorApp(tk.Tk):
 			)
 			return
 
-		self.temp_root = Path(
-			tempfile.mkdtemp(prefix="gopro_timelapse_extract_")
-		)
+		self.temp_root = Path(tempfile.mkdtemp(prefix="gopro_timelapse_extract_"))
 
 		self.is_running = True
 		self.extract_button.config(state="disabled")
@@ -346,8 +418,6 @@ class FrameExtractorApp(tk.Tk):
 	def _extract_directory_worker(self) -> None:
 		input_dir = Path(self.input_dir.get().strip())
 		prefix = self.prefix.get().strip()
-		quality = int(self.quality.get())
-		capture_interval_seconds = float(self.capture_interval.get())
 
 		try:
 			video_files = self._find_video_files(input_dir)
@@ -373,20 +443,29 @@ class FrameExtractorApp(tk.Tk):
 					video,
 					video_output_dir,
 					prefix,
-					quality,
-					capture_interval_seconds,
 				)
 				total_frames += frame_count
 				results.append((video.name, frame_count, video_output_dir))
 
+			if self.immich_enabled:
+				self.after(0, self.status_text.set, "Uploading processed photos to Immich…")
+				self._upload_to_immich(self.temp_root)
+
 			summary_lines = [
 				f"Done. Processed {len(video_files)} video(s).",
-				f"Temporary output folder:",
+				"Temporary output folder:",
 				f"{self.temp_root}",
 				"",
 				f"Total JPEG frames: {total_frames}",
 				"",
 			]
+
+			if self.immich_enabled:
+				summary_lines.extend([
+					"Immich upload: complete",
+					f"Immich server: {self.immich_url}",
+					"",
+				])
 
 			for video_name, frame_count, out_dir in results:
 				summary_lines.append(f"{video_name}: {frame_count} frame(s)")
