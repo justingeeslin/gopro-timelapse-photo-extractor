@@ -22,6 +22,7 @@ class FrameExtractorApp(tk.Tk):
 		self.quality = tk.IntVar(value=2)  # 2 = high quality for ffmpeg MJPEG
 		self.status_text = tk.StringVar(value="Select a action camera (ex. GoPro 360) video file to begin.")
 		self.is_running = False
+		self.capture_interval = tk.DoubleVar(value=0.5)
 
 		self._build_ui()
 		self._guess_default_output_dir()
@@ -196,16 +197,22 @@ class FrameExtractorApp(tk.Tk):
 	def _format_exif_datetime(self, dt: datetime) -> str:
 		return dt.strftime("%Y:%m:%d %H:%M:%S")
 
-	def _write_exif_timestamps(self, output_dir: Path, prefix: str, start_dt: datetime, fps: float) -> None:
+	def _write_exif_timestamps(
+		self,
+		output_dir: Path,
+		prefix: str,
+		start_dt: datetime,
+		capture_interval_seconds: float,
+	) -> None:
 		frame_files = sorted(output_dir.glob(f"{prefix}_*.jpg"))
 		if not frame_files:
 			return
-
+	
 		for i, frame_file in enumerate(frame_files, start=1):
-			seconds_offset = (i - 1) / fps
+			seconds_offset = (i - 1) * capture_interval_seconds
 			frame_dt = start_dt + timedelta(seconds=seconds_offset)
 			exif_dt = self._format_exif_datetime(frame_dt)
-
+	
 			cmd = [
 				"exiftool",
 				"-overwrite_original",
@@ -277,13 +284,13 @@ class FrameExtractorApp(tk.Tk):
 		output = Path(self.output_dir.get().strip())
 		prefix = self.prefix.get().strip()
 		quality = int(self.quality.get())
-
+		
 		try:
 			output.mkdir(parents=True, exist_ok=True)
-
+		
 			start_dt = self._get_video_start_datetime(video)
-			fps = self._get_video_fps(video)
-
+			capture_interval_seconds = 0.5
+		
 			output_pattern = output / f"{prefix}_%06d.jpg"
 			cmd = [
 				"ffmpeg",
@@ -298,20 +305,20 @@ class FrameExtractorApp(tk.Tk):
 				str(quality),
 				str(output_pattern),
 			]
-
+		
 			result = subprocess.run(cmd, capture_output=True, text=True)
 			if result.returncode != 0:
 				error_text = result.stderr.strip() or result.stdout.strip() or "Unknown ffmpeg error"
 				self.after(0, self._finish_with_error, error_text)
 				return
-
-			self._write_exif_timestamps(output, prefix, start_dt, fps)
-
+		
+			self._write_exif_timestamps(output, prefix, start_dt, capture_interval_seconds)
+		
 			frame_count = len(list(output.glob(f"{prefix}_*.jpg")))
 			message = (
 				f"Done. Extracted {frame_count} JPEG frame(s) to:\n{output}\n\n"
 				f"Photo start time: {self._format_exif_datetime(start_dt)}\n"
-				f"FPS used for timestamps: {fps:.6f}\n"
+				f"Capture interval used for timestamps: {capture_interval_seconds:.3f} seconds\n"
 				f"Pattern: {prefix}_000001.jpg"
 			)
 			self.after(0, self._finish_success, message)
