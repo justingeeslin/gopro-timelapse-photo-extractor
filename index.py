@@ -2,120 +2,125 @@ import os
 import threading
 import subprocess
 import shutil
-import json
+import tempfile
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
-import xml.etree.ElementTree as ET
-from datetime import datetime, timedelta, timezone
+
 
 class FrameExtractorApp(tk.Tk):
 	def __init__(self) -> None:
 		super().__init__()
 		self.title("Action Camera Timelapse Photo Extractor")
-		self.geometry("720x430")
-		self.minsize(680, 400)
+		self.geometry("760x460")
+		self.minsize(720, 420)
 
-		self.video_path = tk.StringVar()
-		self.output_dir = tk.StringVar()
+		self.input_dir = tk.StringVar()
 		self.prefix = tk.StringVar(value="frame")
-		self.quality = tk.IntVar(value=2)  # 2 = high quality for ffmpeg MJPEG
-		self.status_text = tk.StringVar(value="Select a action camera (ex. GoPro 360) video file to begin.")
-		self.is_running = False
+		self.quality = tk.IntVar(value=2)
 		self.capture_interval = tk.DoubleVar(value=0.5)
+		self.status_text = tk.StringVar(
+			value="Select a directory containing action camera timelapse videos."
+		)
+		self.is_running = False
+		self.temp_root: Path | None = None
 
 		self._build_ui()
-		self._guess_default_output_dir()
 
 	def _build_ui(self) -> None:
 		container = ttk.Frame(self, padding=14)
 		container.pack(fill="both", expand=True)
 
-		ttk.Label(container, text="Action Camera Video → JPEG Frames", font=("TkDefaultFont", 14, "bold")).pack(anchor="w", pady=(0, 12))
+		ttk.Label(
+			container,
+			text="Action Camera Timelapse Batch Extractor",
+			font=("TkDefaultFont", 14, "bold"),
+		).pack(anchor="w", pady=(0, 12))
 
-		file_frame = ttk.LabelFrame(container, text="Input Video", padding=10)
-		file_frame.pack(fill="x", pady=(0, 10))
+		input_frame = ttk.LabelFrame(container, text="Input Directory", padding=10)
+		input_frame.pack(fill="x", pady=(0, 10))
 
-		ttk.Entry(file_frame, textvariable=self.video_path).pack(side="left", fill="x", expand=True, padx=(0, 8))
-		ttk.Button(file_frame, text="Browse…", command=self.choose_video).pack(side="left")
-
-		output_frame = ttk.LabelFrame(container, text="Output Folder", padding=10)
-		output_frame.pack(fill="x", pady=(0, 10))
-
-		ttk.Entry(output_frame, textvariable=self.output_dir).pack(side="left", fill="x", expand=True, padx=(0, 8))
-		ttk.Button(output_frame, text="Browse…", command=self.choose_output_dir).pack(side="left")
+		ttk.Entry(input_frame, textvariable=self.input_dir).pack(
+			side="left", fill="x", expand=True, padx=(0, 8)
+		)
+		ttk.Button(input_frame, text="Browse…", command=self.choose_input_dir).pack(side="left")
 
 		options = ttk.LabelFrame(container, text="Options", padding=10)
 		options.pack(fill="x", pady=(0, 10))
 
-		ttk.Label(options, text="Filename prefix:").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
-		ttk.Entry(options, textvariable=self.prefix, width=18).grid(row=0, column=1, sticky="w", pady=4)
+		ttk.Label(options, text="Filename prefix:").grid(
+			row=0, column=0, sticky="w", padx=(0, 8), pady=4
+		)
+		ttk.Entry(options, textvariable=self.prefix, width=18).grid(
+			row=0, column=1, sticky="w", pady=4
+		)
 
-		ttk.Label(options, text="JPEG quality (2=best, 31=lowest):").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
-		ttk.Spinbox(options, from_=2, to=31, textvariable=self.quality, width=8).grid(row=1, column=1, sticky="w", pady=4)
+		ttk.Label(options, text="JPEG quality (2=best, 31=lowest):").grid(
+			row=1, column=0, sticky="w", padx=(0, 8), pady=4
+		)
+		ttk.Spinbox(options, from_=2, to=31, textvariable=self.quality, width=8).grid(
+			row=1, column=1, sticky="w", pady=4
+		)
+
+		ttk.Label(options, text="Capture interval (seconds):").grid(
+			row=2, column=0, sticky="w", padx=(0, 8), pady=4
+		)
+		ttk.Entry(options, textvariable=self.capture_interval, width=8).grid(
+			row=2, column=1, sticky="w", pady=4
+		)
 
 		help_text = (
-			"This app uses ffmpeg to extract every frame from the selected video as JPEG files.\n"
-			"For a GoPro timelapse video, extracting every frame preserves each captured moment."
+			"This app scans a directory for action camera videos, extracts every frame as JPEG,\n"
+			"extracts GoPro telemetry to GPX, writes timestamps from the GPX master clock,\n"
+			"and geotags the frames. Output is written to a temporary directory."
 		)
 		ttk.Label(container, text=help_text, justify="left").pack(anchor="w", pady=(0, 10))
 
 		button_row = ttk.Frame(container)
 		button_row.pack(fill="x", pady=(0, 10))
 
-		ttk.Button(button_row, text="Open Output Folder", command=self.open_output_folder).pack(side="left")
+		ttk.Button(button_row, text="Open Output Folder", command=self.open_output_folder).pack(
+			side="left"
+		)
 
 		self.progress = ttk.Progressbar(button_row, mode="indeterminate", length=180)
 		self.progress.pack(side="right", padx=(0, 10))
 		self.progress.pack_forget()
 
-		self.extract_button = ttk.Button(button_row, text="Extract Frames", command=self.start_extraction)
+		self.extract_button = ttk.Button(
+			button_row, text="Process Videos", command=self.start_extraction
+		)
 		self.extract_button.pack(side="right")
 
 		status_frame = ttk.LabelFrame(container, text="Status", padding=10)
 		status_frame.pack(fill="both", expand=True)
 
-		self.status_label = ttk.Label(status_frame, textvariable=self.status_text, justify="left", anchor="nw")
+		self.status_label = ttk.Label(
+			status_frame,
+			textvariable=self.status_text,
+			justify="left",
+			anchor="nw",
+		)
 		self.status_label.pack(fill="both", expand=True)
 
-	def _guess_default_output_dir(self) -> None:
-		home = Path.home()
-		self.output_dir.set(str(home / "gopro_frames"))
-
-	def choose_video(self) -> None:
-		file_path = filedialog.askopenfilename(
-			title="Choose a action camera video",
-			filetypes=[
-				("Video files", "*.mp4 *.mov *.mkv *.360"),
-				("All files", "*.*"),
-			],
-		)
-		if file_path:
-			self.video_path.set(file_path)
-			video_stem = Path(file_path).stem
-			suggested = Path(self.output_dir.get()) / video_stem
-			self.output_dir.set(str(suggested))
-			self.status_text.set(f"Selected video: {file_path}")
-
-	def choose_output_dir(self) -> None:
-		directory = filedialog.askdirectory(title="Choose output folder")
+	def choose_input_dir(self) -> None:
+		directory = filedialog.askdirectory(title="Choose directory containing videos")
 		if directory:
-			self.output_dir.set(directory)
-			self.status_text.set(f"Selected output folder: {directory}")
+			self.input_dir.set(directory)
+			self.status_text.set(f"Selected input directory: {directory}")
 
 	def open_output_folder(self) -> None:
-		output = self.output_dir.get().strip()
-		if not output:
-			messagebox.showwarning("No folder", "Choose an output folder first.")
+		if self.temp_root is None:
+			messagebox.showwarning("No output yet", "No temporary output folder has been created yet.")
 			return
 
-		output_path = Path(output)
-		if not output_path.exists():
-			messagebox.showwarning("Folder not found", "The output folder does not exist yet.")
+		if not self.temp_root.exists():
+			messagebox.showwarning("Folder not found", "The temporary output folder no longer exists.")
 			return
 
-		self._open_folder_path(str(output_path))
+		self._open_folder_path(str(self.temp_root))
 
 	def _open_folder_path(self, path: str) -> None:
 		try:
@@ -128,116 +133,16 @@ class FrameExtractorApp(tk.Tk):
 		except Exception as exc:
 			messagebox.showerror("Open folder failed", str(exc))
 
-	def _get_video_start_datetime(self, video_path: Path) -> datetime:
-		cmd = [
-			"ffprobe",
-			"-v", "error",
-			"-show_entries", "format_tags=creation_time:stream_tags=creation_time",
-			"-of", "json",
-			str(video_path),
-		]
-		result = subprocess.run(cmd, capture_output=True, text=True)
-		if result.returncode != 0:
-			raise RuntimeError(result.stderr.strip() or "Could not read video metadata")
-
-		data = json.loads(result.stdout)
-
-		creation_time = None
-
-		format_tags = data.get("format", {}).get("tags", {})
-		creation_time = format_tags.get("creation_time")
-
-		if not creation_time:
-			for stream in data.get("streams", []):
-				stream_tags = stream.get("tags", {})
-				if "creation_time" in stream_tags:
-					creation_time = stream_tags["creation_time"]
-					break
-
-		if not creation_time:
-			raise RuntimeError(
-				"No creation_time metadata found in the video. "
-				"Cannot determine when the frames were captured."
-			)
-
-		creation_time = creation_time.replace("Z", "+00:00")
-		dt = datetime.fromisoformat(creation_time)
-
-		if dt.tzinfo is not None:
-			dt = dt.astimezone().replace(tzinfo=None)
-
-		return dt
-
-	def _get_gpx_start_datetime(self, gpx_path: Path) -> datetime:
-		try:
-			tree = ET.parse(gpx_path)
-			root = tree.getroot()
-		except Exception as exc:
-			raise RuntimeError(f"Failed to parse GPX file: {exc}")
-		
-		# GPX usually uses this namespace
-		ns = {"gpx": "http://www.topografix.com/GPX/1/1"}
-		
-		# Find the first track point time
-		time_elem = root.find(".//gpx:trkpt/gpx:time", ns)
-		
-		# Fallback in case namespace handling differs
-		if time_elem is None:
-			for elem in root.iter():
-				if elem.tag.endswith("time") and elem.text:
-					time_elem = elem
-					break
-		
-		if time_elem is None or not time_elem.text:
-			raise RuntimeError("No track timestamp found in GPX file")
-		
-		time_text = time_elem.text.strip()
-		
-		# Example: 2026-04-13T16:42:52.964Z
-		if time_text.endswith("Z"):
-			dt = datetime.fromisoformat(time_text.replace("Z", "+00:00"))
-		else:
-			dt = datetime.fromisoformat(time_text)
-		
-		# Convert UTC GPX time to local time, then drop tzinfo for EXIF
-		if dt.tzinfo is not None:
-			dt = dt.astimezone().replace(tzinfo=None)
-		
-		return dt
-
-	def _get_video_fps(self, video_path: Path) -> float:
-		cmd = [
-			"ffprobe",
-			"-v", "error",
-			"-select_streams", "v:0",
-			"-show_entries", "stream=r_frame_rate",
-			"-of", "json",
-			str(video_path),
-		]
-		result = subprocess.run(cmd, capture_output=True, text=True)
-		if result.returncode != 0:
-			raise RuntimeError(result.stderr.strip() or "Could not determine video FPS")
-
-		data = json.loads(result.stdout)
-		streams = data.get("streams", [])
-		if not streams:
-			raise RuntimeError("No video stream found")
-
-		rate = streams[0].get("r_frame_rate", "0/0")
-		num_str, den_str = rate.split("/")
-		num = float(num_str)
-		den = float(den_str)
-		if den == 0:
-			raise RuntimeError("Invalid FPS reported by ffprobe")
-
-		return num / den
-
-	def _format_exif_datetime(self, dt: datetime) -> str:
-		return dt.strftime("%Y:%m:%d %H:%M:%S")
+	def _find_video_files(self, input_dir: Path) -> list[Path]:
+		supported_suffixes = {".mp4", ".mov", ".mkv", ".360"}
+		return sorted(
+			p for p in input_dir.iterdir()
+			if p.is_file() and p.suffix.lower() in supported_suffixes
+		)
 
 	def _extract_gpx_track(self, video_path: Path, output_dir: Path) -> Path:
 		gpx_path = output_dir / "track.gpx"
-		
+
 		cmd = [
 			"exiftool",
 			"-ee",
@@ -245,38 +150,53 @@ class FrameExtractorApp(tk.Tk):
 			"gpx.fmt",
 			str(video_path),
 		]
-		
+
 		with open(gpx_path, "w", encoding="utf-8") as f:
 			result = subprocess.run(cmd, stdout=f, stderr=subprocess.PIPE, text=True)
-		
+
 		if result.returncode != 0:
 			raise RuntimeError(
 				result.stderr.strip() or "Failed to extract GPX track from video telemetry"
 			)
-		
+
 		if not gpx_path.exists() or gpx_path.stat().st_size == 0:
 			raise RuntimeError("GPX track extraction produced an empty file")
-		
+
 		return gpx_path
-	
-	def _geotag_frames_with_gpx(self, output_dir: Path, prefix: str, gpx_path: Path) -> None:
-		frame_files = sorted(output_dir.glob(f"{prefix}_*.jpg"))
-		if not frame_files:
-			return
-	
-		cmd = [
-			"exiftool",
-			"-overwrite_original",
-			f"-geotag={gpx_path}",
-			"-geotime<${DateTimeOriginal}",
-			*[str(frame_file) for frame_file in frame_files],
-		]
-	
-		result = subprocess.run(cmd, capture_output=True, text=True)
-		if result.returncode != 0:
-			raise RuntimeError(
-				result.stderr.strip() or result.stdout.strip() or "Failed to geotag frames from GPX"
-			)
+
+	def _get_gpx_start_datetime(self, gpx_path: Path) -> datetime:
+		try:
+			tree = ET.parse(gpx_path)
+			root = tree.getroot()
+		except Exception as exc:
+			raise RuntimeError(f"Failed to parse GPX file: {exc}")
+
+		ns = {"gpx": "http://www.topografix.com/GPX/1/1"}
+		time_elem = root.find(".//gpx:trkpt/gpx:time", ns)
+
+		if time_elem is None:
+			for elem in root.iter():
+				if elem.tag.endswith("time") and elem.text:
+					time_elem = elem
+					break
+
+		if time_elem is None or not time_elem.text:
+			raise RuntimeError("No track timestamp found in GPX file")
+
+		time_text = time_elem.text.strip()
+
+		if time_text.endswith("Z"):
+			dt = datetime.fromisoformat(time_text.replace("Z", "+00:00"))
+		else:
+			dt = datetime.fromisoformat(time_text)
+
+		if dt.tzinfo is not None:
+			dt = dt.astimezone().replace(tzinfo=None)
+
+		return dt
+
+	def _format_exif_datetime(self, dt: datetime) -> str:
+		return dt.strftime("%Y:%m:%d %H:%M:%S")
 
 	def _write_exif_timestamps(
 		self,
@@ -288,14 +208,14 @@ class FrameExtractorApp(tk.Tk):
 		frame_files = sorted(output_dir.glob(f"{prefix}_*.jpg"))
 		if not frame_files:
 			return
-	
+
 		for i, frame_file in enumerate(frame_files, start=1):
 			seconds_offset = (i - 1) * capture_interval_seconds
 			frame_dt = start_dt + timedelta(seconds=seconds_offset)
-	
+
 			exif_main = frame_dt.strftime("%Y:%m:%d %H:%M:%S")
 			subsec = f"{frame_dt.microsecond // 1000:03d}".rstrip("0") or "0"
-	
+
 			cmd = [
 				"exiftool",
 				"-overwrite_original",
@@ -314,112 +234,200 @@ class FrameExtractorApp(tk.Tk):
 					f"{result.stderr.strip() or result.stdout.strip()}"
 				)
 
+	def _geotag_frames_with_gpx(self, output_dir: Path, prefix: str, gpx_path: Path) -> None:
+		frame_files = sorted(output_dir.glob(f"{prefix}_*.jpg"))
+		if not frame_files:
+			return
+
+		cmd = [
+			"exiftool",
+			"-overwrite_original",
+			"-api",
+			"GeoMaxIntSecs=600",
+			f"-geotag={gpx_path}",
+			"-geotime<${DateTimeOriginal}",
+			*[str(frame_file) for frame_file in frame_files],
+		]
+
+		result = subprocess.run(cmd, capture_output=True, text=True)
+		if result.returncode != 0:
+			raise RuntimeError(
+				result.stderr.strip()
+				or result.stdout.strip()
+				or "Failed to geotag frames from GPX"
+			)
+
+	def _process_single_video(
+		self,
+		video: Path,
+		video_output_dir: Path,
+		prefix: str,
+		quality: int,
+		capture_interval_seconds: float,
+	) -> int:
+		video_output_dir.mkdir(parents=True, exist_ok=True)
+
+		self.after(0, self.status_text.set, f"[{video.name}] Extracting frames…")
+
+		output_pattern = video_output_dir / f"{prefix}_%06d.jpg"
+		cmd = [
+			"ffmpeg",
+			"-hide_banner",
+			"-loglevel",
+			"error",
+			"-i",
+			str(video),
+			"-vsync",
+			"0",
+			"-q:v",
+			str(quality),
+			str(output_pattern),
+		]
+
+		result = subprocess.run(cmd, capture_output=True, text=True)
+		if result.returncode != 0:
+			raise RuntimeError(
+				f"{video.name}: "
+				f"{result.stderr.strip() or result.stdout.strip() or 'Unknown ffmpeg error'}"
+			)
+
+		self.after(0, self.status_text.set, f"[{video.name}] Extracting GPS track…")
+		gpx_path = self._extract_gpx_track(video, video_output_dir)
+
+		self.after(0, self.status_text.set, f"[{video.name}] Reading GPX start time…")
+		start_dt = self._get_gpx_start_datetime(gpx_path)
+
+		self.after(0, self.status_text.set, f"[{video.name}] Writing photo timestamps…")
+		self._write_exif_timestamps(
+			video_output_dir,
+			prefix,
+			start_dt,
+			capture_interval_seconds,
+		)
+
+		self.after(0, self.status_text.set, f"[{video.name}] Geotagging frames…")
+		self._geotag_frames_with_gpx(video_output_dir, prefix, gpx_path)
+
+		frame_count = len(list(video_output_dir.glob(f"{prefix}_*.jpg")))
+		return frame_count
+
 	def start_extraction(self) -> None:
 		if self.is_running:
 			return
 
-		video = self.video_path.get().strip()
-		output = self.output_dir.get().strip()
+		input_dir_str = self.input_dir.get().strip()
 		prefix = self.prefix.get().strip()
 
-		if not video:
-			messagebox.showwarning("Missing video", "Please choose a video file.")
+		if not input_dir_str:
+			messagebox.showwarning("Missing input directory", "Please choose an input directory.")
 			return
-		if not Path(video).exists():
-			messagebox.showwarning("Video not found", "The selected video file does not exist.")
+
+		input_dir = Path(input_dir_str)
+		if not input_dir.exists() or not input_dir.is_dir():
+			messagebox.showwarning("Directory not found", "The selected input directory does not exist.")
 			return
-		if not output:
-			messagebox.showwarning("Missing output folder", "Please choose an output folder.")
-			return
+
 		if not prefix:
 			messagebox.showwarning("Missing prefix", "Please provide a filename prefix.")
 			return
-		if shutil.which("ffmpeg") is None:
-			messagebox.showerror(
-				"ffmpeg not found",
-				"ffmpeg is required but was not found on your PATH.\n\n"
-				"Install it first, then reopen this app."
+
+		try:
+			capture_interval = float(self.capture_interval.get())
+			if capture_interval <= 0:
+				raise ValueError
+		except Exception:
+			messagebox.showwarning(
+				"Invalid capture interval",
+				"Capture interval must be a positive number.",
 			)
 			return
-		if shutil.which("ffprobe") is None:
-			messagebox.showerror(
-				"ffprobe not found",
-				"ffprobe is required but was not found on your PATH.\n\n"
-				"Install ffmpeg/ffprobe, then reopen this app."
+
+		for tool_name, friendly_name in [
+			("ffmpeg", "ffmpeg"),
+			("ffprobe", "ffprobe"),
+			("exiftool", "exiftool"),
+		]:
+			if shutil.which(tool_name) is None:
+				messagebox.showerror(
+					f"{friendly_name} not found",
+					f"{friendly_name} is required but was not found on your PATH.\n\n"
+					f"Install it first, then reopen this app.",
+				)
+				return
+
+		video_files = self._find_video_files(input_dir)
+		if not video_files:
+			messagebox.showwarning(
+				"No videos found",
+				"No supported video files were found in the selected directory.",
 			)
 			return
-		if shutil.which("exiftool") is None:
-			messagebox.showerror(
-				"exiftool not found",
-				"exiftool is required to write photo timestamps.\n\n"
-				"Install it first, then reopen this app."
-			)
-			return
+
+		self.temp_root = Path(
+			tempfile.mkdtemp(prefix="gopro_timelapse_extract_")
+		)
 
 		self.is_running = True
 		self.extract_button.config(state="disabled")
 		self.progress.pack(side="right", padx=(0, 10))
 		self.progress.start(10)
-		self.status_text.set("Extracting frames and writing EXIF timestamps…")
+		self.status_text.set(
+			f"Found {len(video_files)} video(s). Processing into temporary folder:\n{self.temp_root}"
+		)
 
-		thread = threading.Thread(target=self._extract_frames_worker, daemon=True)
+		thread = threading.Thread(target=self._extract_directory_worker, daemon=True)
 		thread.start()
 
-	def _extract_frames_worker(self) -> None:
-		video = Path(self.video_path.get().strip())
-		output = Path(self.output_dir.get().strip())
+	def _extract_directory_worker(self) -> None:
+		input_dir = Path(self.input_dir.get().strip())
 		prefix = self.prefix.get().strip()
 		quality = int(self.quality.get())
-		
+		capture_interval_seconds = float(self.capture_interval.get())
+
 		try:
-			output.mkdir(parents=True, exist_ok=True)
-		
-			capture_interval_seconds = 0.5
-		
-			self.after(0, self.status_text.set, "Extracting frames…")
-		
-			output_pattern = output / f"{prefix}_%06d.jpg"
-			cmd = [
-				"ffmpeg",
-				"-hide_banner",
-				"-loglevel",
-				"error",
-				"-i",
-				str(video),
-				"-vsync",
-				"0",
-				"-q:v",
-				str(quality),
-				str(output_pattern),
-			]
-		
-			result = subprocess.run(cmd, capture_output=True, text=True)
-			if result.returncode != 0:
-				error_text = result.stderr.strip() or result.stdout.strip() or "Unknown ffmpeg error"
-				self.after(0, self._finish_with_error, error_text)
+			video_files = self._find_video_files(input_dir)
+			if not video_files:
+				self.after(0, self._finish_with_error, "No supported video files found.")
 				return
-		
-			self.after(0, self.status_text.set, "Extracting GPS track from GoPro telemetry…")
-			gpx_path = self._extract_gpx_track(video, output)
-		
-			self.after(0, self.status_text.set, "Reading first GPX timestamp…")
-			start_dt = self._get_gpx_start_datetime(gpx_path)
-		
-			self.after(0, self.status_text.set, "Writing photo timestamps from GPX master clock…")
-			self._write_exif_timestamps(output, prefix, start_dt, capture_interval_seconds)
-		
-			self.after(0, self.status_text.set, "Geotagging extracted frames…")
-			self._geotag_frames_with_gpx(output, prefix, gpx_path)
-		
-			frame_count = len(list(output.glob(f"{prefix}_*.jpg")))
-			message = (
-				f"Done. Extracted {frame_count} JPEG frame(s) to:\n{output}\n\n"
-				f"Master clock source: {gpx_path.name}\n"
-				f"Photo start time: {self._format_exif_datetime(start_dt)}\n"
-				f"Capture interval used for timestamps: {capture_interval_seconds:.3f} seconds\n"
-				f"Pattern: {prefix}_000001.jpg"
-			)
-			self.after(0, self._finish_success, message)
+
+			if self.temp_root is None:
+				raise RuntimeError("Temporary output directory was not initialized.")
+
+			total_frames = 0
+			results = []
+
+			for idx, video in enumerate(video_files, start=1):
+				video_output_dir = self.temp_root / video.stem
+				self.after(
+					0,
+					self.status_text.set,
+					f"Processing video {idx} of {len(video_files)}:\n{video.name}",
+				)
+
+				frame_count = self._process_single_video(
+					video,
+					video_output_dir,
+					prefix,
+					quality,
+					capture_interval_seconds,
+				)
+				total_frames += frame_count
+				results.append((video.name, frame_count, video_output_dir))
+
+			summary_lines = [
+				f"Done. Processed {len(video_files)} video(s).",
+				f"Temporary output folder:",
+				f"{self.temp_root}",
+				"",
+				f"Total JPEG frames: {total_frames}",
+				"",
+			]
+
+			for video_name, frame_count, out_dir in results:
+				summary_lines.append(f"{video_name}: {frame_count} frame(s)")
+				summary_lines.append(f"  {out_dir}")
+
+			self.after(0, self._finish_success, "\n".join(summary_lines))
 		except Exception as exc:
 			self.after(0, self._finish_with_error, str(exc))
 
@@ -430,24 +438,24 @@ class FrameExtractorApp(tk.Tk):
 		self.progress.pack_forget()
 		self.status_text.set(message)
 
-		output = self.output_dir.get().strip()
+		output = str(self.temp_root) if self.temp_root else ""
 		try:
 			open_now = messagebox.askyesno(
-				"Extraction complete",
-				f"Extraction complete.\n\nOpen output folder?\n{output}"
+				"Processing complete",
+				f"Processing complete.\n\nOpen temporary output folder?\n{output}",
 			)
 			if open_now and output:
 				self._open_folder_path(output)
 		except Exception:
-			messagebox.showinfo("Extraction complete", "Extraction complete.")
+			messagebox.showinfo("Processing complete", "Processing complete.")
 
 	def _finish_with_error(self, error_message: str) -> None:
 		self.is_running = False
 		self.extract_button.config(state="normal")
 		self.progress.stop()
 		self.progress.pack_forget()
-		self.status_text.set(f"Extraction failed: {error_message}")
-		messagebox.showerror("Extraction failed", error_message)
+		self.status_text.set(f"Processing failed: {error_message}")
+		messagebox.showerror("Processing failed", error_message)
 
 
 if __name__ == "__main__":
