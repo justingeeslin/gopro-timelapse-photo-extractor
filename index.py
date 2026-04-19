@@ -42,8 +42,9 @@ class FrameExtractorApp(tk.Tk):
 		self._build_ui()
 		
 	def _log(self, message: str) -> None:
+		timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 		self.status_log.configure(state="normal")
-		self.status_log.insert("end", message + "\n")
+		self.status_log.insert("end", f"[{timestamp}] {message}\n")
 		self.status_log.see("end")
 		self.status_log.configure(state="disabled")
 	
