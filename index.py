@@ -15,7 +15,7 @@ class FrameExtractorApp(tk.Tk):
 		super().__init__()
 		self.title("Action Camera Timelapse Batch Extractor")
 		self.geometry("760x460")
-		self.minsize(720, 420)
+		self.minsize(720, 620)
 
 		self.input_dir = tk.StringVar()
 		self.prefix = tk.StringVar(value="frame")
@@ -31,9 +31,9 @@ class FrameExtractorApp(tk.Tk):
 		self.capture_interval_seconds = 0.5
 
 		# Immich configuration
-		self.immich_enabled = True
-		self.immich_url = "http://localhost:2283/api"
-		self.immich_api_key = "pRGcu77MKZwFXlaGiggCSE1jzFleZywxjbsZtN7Pxs"
+		self.immich_enabled = tk.BooleanVar(value=True)
+		self.immich_url = tk.StringVar(value="http://localhost:2283/api")
+		self.immich_api_key = tk.StringVar(value="pRGcu77MKZwFXlaGiggCSE1jzFleZywxjbsZtN7Pxs")
 		self.immich_auto_album = True
 		self.immich_album_name = ""
 		self.immich_upload_concurrency = 4
@@ -68,6 +68,33 @@ class FrameExtractorApp(tk.Tk):
 		ttk.Entry(options, textvariable=self.prefix, width=18).grid(
 			row=0, column=1, sticky="w", pady=4
 		)
+		
+		immich_frame = ttk.LabelFrame(container, text="Immich Settings", padding=10)
+		immich_frame.pack(fill="x", pady=(0, 10))
+		
+		ttk.Checkbutton(
+			immich_frame,
+			text="Upload to Immich",
+			variable=self.immich_enabled
+		).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
+		
+		ttk.Label(immich_frame, text="Server URL:").grid(
+			row=1, column=0, sticky="w", padx=(0, 8), pady=4
+		)
+		ttk.Entry(immich_frame, textvariable=self.immich_url).grid(
+			row=1, column=1, sticky="ew", pady=4
+		)
+		
+		ttk.Label(immich_frame, text="API Key:").grid(
+			row=2, column=0, sticky="w", padx=(0, 8), pady=4
+		)
+		ttk.Entry(
+			immich_frame,
+			textvariable=self.immich_api_key,
+			show="*"
+		).grid(row=2, column=1, sticky="ew", pady=4)
+		
+		immich_frame.columnconfigure(1, weight=1)
 
 		help_text = (
 			"This app scans a directory for action camera videos, extracts every frame as JPEG,\n"
@@ -259,37 +286,59 @@ class FrameExtractorApp(tk.Tk):
 		return shutil.which("immich")
 
 	def _upload_to_immich(self, upload_root: Path) -> None:
-		if not self.immich_enabled:
+		if not self.immich_enabled.get():
+			print("Immich upload skipped: disabled")
 			return
-
+		
+		url = self.immich_url.get().strip()
+		api_key = self.immich_api_key.get().strip()
+		
+		print(f"Immich enabled: {self.immich_enabled.get()}")
+		print(f"Immich upload root: {upload_root}")
+		print(f"Immich URL: {url}")
+		
+		if not url or not api_key:
+			raise RuntimeError("Immich URL and API key must be provided.")
+		
 		immich_cli = self._find_immich_cli()
+		print(f"Immich CLI path: {immich_cli}")
+		
 		if immich_cli is None:
 			raise RuntimeError(
-				"Immich CLI not found. Install it with:\n\n"
-				"npm i -g @immich/cli"
+				"Immich CLI not found. Install it with:\n\nnpm i -g @immich/cli"
 			)
-
+		
 		cmd = [
 			immich_cli,
-			"-u", self.immich_url,
-			"-k", self.immich_api_key,
+			"-u", url,
+			"-k", api_key,
 			"upload",
 			"--recursive",
 			"-c", str(self.immich_upload_concurrency),
 			"--no-progress",
 		]
-
+		
 		if self.immich_skip_hash:
 			cmd.append("--skip-hash")
-
+		
 		if self.immich_album_name.strip():
 			cmd.extend(["--album-name", self.immich_album_name.strip()])
 		elif self.immich_auto_album:
 			cmd.append("--album")
-
+		
 		cmd.append(str(upload_root))
-
+		
+		print("Running Immich command:")
+		print(" ".join(cmd[:-3] + ["***API_KEY_HIDDEN***"] if len(cmd) > 3 else cmd))
+		
 		result = subprocess.run(cmd, capture_output=True, text=True)
+		
+		print(f"Immich return code: {result.returncode}")
+		print("Immich stdout:")
+		print(result.stdout)
+		print("Immich stderr:")
+		print(result.stderr)
+		
 		if result.returncode != 0:
 			raise RuntimeError(
 				result.stderr.strip()
@@ -385,7 +434,7 @@ class FrameExtractorApp(tk.Tk):
 				)
 				return
 
-		if self.immich_enabled and self._find_immich_cli() is None:
+		if self.immich_enabled.get() and self._find_immich_cli() is None:
 			messagebox.showerror(
 				"Immich CLI not found",
 				"Immich upload is enabled, but the Immich CLI was not found.\n\n"
@@ -447,7 +496,7 @@ class FrameExtractorApp(tk.Tk):
 				total_frames += frame_count
 				results.append((video.name, frame_count, video_output_dir))
 
-			if self.immich_enabled:
+			if self.immich_enabled.get():
 				self.after(0, self.status_text.set, "Uploading processed photos to Immich…")
 				self._upload_to_immich(self.temp_root)
 
@@ -460,10 +509,10 @@ class FrameExtractorApp(tk.Tk):
 				"",
 			]
 
-			if self.immich_enabled:
+			if self.immich_enabled.get():
 				summary_lines.extend([
 					"Immich upload: complete",
-					f"Immich server: {self.immich_url}",
+					f"Immich server: {self.immich_url.get()}",
 					"",
 				])
 
