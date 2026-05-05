@@ -3,6 +3,7 @@ import threading
 import subprocess
 import shutil
 import tempfile
+import csv
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -38,6 +39,9 @@ class FrameExtractorApp(tk.Tk):
 		self.immich_album_name = ""
 		self.immich_upload_concurrency = 4
 		self.immich_skip_hash = False
+		
+		self.tags_csv_path = tk.StringVar()
+		self.tag_match_tolerance_seconds = 1.0
 
 		self._build_ui()
 		
@@ -80,6 +84,22 @@ class FrameExtractorApp(tk.Tk):
 		ttk.Entry(options, textvariable=self.prefix, width=18).grid(
 			row=0, column=1, sticky="w", pady=4
 		)
+		
+		ttk.Label(options, text="Tags CSV:").grid(
+			row=1, column=0, sticky="w", padx=(0, 8), pady=4
+		)
+		
+		ttk.Entry(options, textvariable=self.tags_csv_path).grid(
+			row=1, column=1, sticky="ew", pady=4
+		)
+		
+		ttk.Button(
+			options,
+			text="Browse…",
+			command=self.choose_tags_csv
+		).grid(row=1, column=2, sticky="w", padx=(8, 0), pady=4)
+		
+		options.columnconfigure(1, weight=1)
 		
 		immich_frame = ttk.LabelFrame(container, text="Immich Settings", padding=10)
 		immich_frame.pack(fill="x", pady=(0, 10))
@@ -296,6 +316,158 @@ class FrameExtractorApp(tk.Tk):
 				or "Failed to geotag frames from GPX"
 			)
 
+	def choose_tags_csv(self) -> None:
+		file_path = filedialog.askopenfilename(
+			title="Choose tags CSV",
+			filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+		)
+		
+		if file_path:
+			self.tags_csv_path.set(file_path)
+			self._log(f"Selected tags CSV: {file_path}")
+			
+	def _parse_csv_datetime(self, value: str) -> datetime:
+		value = value.strip()
+	
+		formats = [
+			"%Y-%m-%d %H:%M:%S.%f",
+			"%Y-%m-%d %H:%M:%S",
+			"%Y:%m:%d %H:%M:%S.%f",
+			"%Y:%m:%d %H:%M:%S",
+			"%m/%d/%Y %H:%M:%S",
+		]
+	
+		for fmt in formats:
+			try:
+				return datetime.strptime(value, fmt)
+			except ValueError:
+				pass
+	
+		if value.endswith("Z"):
+			return datetime.fromisoformat(value.replace("Z", "+00:00")).replace(tzinfo=None)
+	
+		return datetime.fromisoformat(value)
+	
+	
+	def _load_tag_rows_from_csv(self, csv_path: Path) -> list[dict]:
+		with open(csv_path, newline="", encoding="utf-8-sig") as f:
+			reader = csv.DictReader(f)
+			rows = list(reader)
+	
+		if not rows:
+			return []
+	
+		fieldnames = reader.fieldnames or []
+	
+		time_column = None
+		for candidate in ["timestamp", "datetime", "date_time", "time", "date"]:
+			for field in fieldnames:
+				if field.lower().strip() == candidate:
+					time_column = field
+					break
+			if time_column:
+				break
+	
+		if time_column is None:
+			raise RuntimeError(
+				"Tags CSV must contain a timestamp column named one of: "
+				"timestamp, datetime, date_time, time, or date."
+			)
+	
+		parsed_rows = []
+	
+		for row in rows:
+			raw_time = row.get(time_column, "")
+			if not raw_time:
+				continue
+	
+			row_dt = self._parse_csv_datetime(raw_time)
+	
+			tags = []
+			for header, value in row.items():
+				if header == time_column:
+					continue
+	
+				value = (value or "").strip()
+				if not value:
+					continue
+	
+				tags.append(f"{header}: {value}")
+	
+			parsed_rows.append({
+				"datetime": row_dt,
+				"tags": tags,
+			})
+	
+		return parsed_rows
+	
+	
+	def _find_tags_for_datetime(
+		self,
+		frame_dt: datetime,
+		tag_rows: list[dict],
+	) -> list[str]:
+		best_row = None
+		best_delta = None
+	
+		for row in tag_rows:
+			delta = abs((frame_dt - row["datetime"]).total_seconds())
+	
+			if best_delta is None or delta < best_delta:
+				best_delta = delta
+				best_row = row
+	
+		if best_row is None:
+			return []
+	
+		if best_delta is not None and best_delta <= self.tag_match_tolerance_seconds:
+			return best_row["tags"]
+	
+		return []
+	
+	
+	def _write_xmp_tags_from_csv(
+		self,
+		output_dir: Path,
+		prefix: str,
+		start_dt: datetime,
+		capture_interval_seconds: float,
+		csv_path: Path,
+	) -> None:
+		tag_rows = self._load_tag_rows_from_csv(csv_path)
+	
+		if not tag_rows:
+			self.after(0, self._log, "Tags CSV contained no usable tag rows.")
+			return
+	
+		frame_files = sorted(output_dir.glob(f"{prefix}_*.jpg"))
+	
+		for i, frame_file in enumerate(frame_files, start=1):
+			frame_dt = start_dt + timedelta(seconds=(i - 1) * capture_interval_seconds)
+			tags = self._find_tags_for_datetime(frame_dt, tag_rows)
+	
+			if not tags:
+				continue
+	
+			cmd = [
+				"exiftool",
+				"-overwrite_original",
+			]
+	
+			for tag in tags:
+				cmd.append(f"-XMP-dc:Subject+={tag}")
+				cmd.append(f"-XMP-lr:HierarchicalSubject+={tag}")
+	
+			cmd.append(str(frame_file))
+	
+			result = subprocess.run(cmd, capture_output=True, text=True)
+	
+			if result.returncode != 0:
+				raise RuntimeError(
+					f"Failed to write XMP tags for {frame_file.name}: "
+					f"{result.stderr.strip() or result.stdout.strip()}"
+				)
+
 	def _find_immich_cli(self) -> str | None:
 		return shutil.which("immich")
 
@@ -347,11 +519,11 @@ class FrameExtractorApp(tk.Tk):
 		
 		result = subprocess.run(cmd, capture_output=True, text=True)
 		
-		print(f"Immich return code: {result.returncode}")
+		self._log(f"Immich return code: {result.returncode}")
 		print("Immich stdout:")
-		print(result.stdout)
+		self._log(result.stdout)
 		print("Immich stderr:")
-		print(result.stderr)
+		self._log(result.stderr)
 		
 		if result.returncode != 0:
 			raise RuntimeError(
@@ -408,6 +580,18 @@ class FrameExtractorApp(tk.Tk):
 			start_dt,
 			capture_interval_seconds,
 		)
+		
+		tags_csv = self.tags_csv_path.get().strip()
+		
+		if tags_csv:
+			self.after(0, self._log, f"[{video.name}] Writing XMP tags from CSV…")
+			self._write_xmp_tags_from_csv(
+				video_output_dir,
+				prefix,
+				start_dt,
+				capture_interval_seconds,
+				Path(tags_csv),
+			)
 
 		self.after(0, self._log, f"[{video.name}] Geotagging frames…")
 		self._geotag_frames_with_gpx(video_output_dir, prefix, gpx_path)
