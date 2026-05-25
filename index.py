@@ -164,6 +164,42 @@ class FrameExtractorApp(tk.Tk):
 		
 		self._log("Select a directory containing action camera timelapse videos.")
 
+	def _round_capture_interval(self, seconds: float) -> float:
+		# Round to nearest 0.5 seconds, clamp to 0.5–60 seconds.
+		rounded = round(seconds * 2) / 2
+		return max(0.5, min(60.0, rounded))
+	
+	
+	def _get_video_file_duration_seconds(self, video_path: Path) -> float:
+		stat = video_path.stat()
+	
+		# macOS has creation/birth time. Other platforms may not.
+		created_ts = getattr(stat, "st_birthtime", stat.st_ctime)
+		modified_ts = stat.st_mtime
+	
+		duration = modified_ts - created_ts
+	
+		if duration <= 0:
+			raise RuntimeError(
+				f"{video_path.name}: Could not compute duration from file timestamps."
+			)
+	
+		return duration
+	
+	
+	def _compute_capture_interval_from_file_times(
+		self,
+		video_path: Path,
+		frame_count: int,
+	) -> float:
+		if frame_count <= 0:
+			raise RuntimeError(f"{video_path.name}: No extracted frames found.")
+	
+		duration_seconds = self._get_video_file_duration_seconds(video_path)
+	
+		raw_interval = duration_seconds / frame_count
+		return self._round_capture_interval(raw_interval)
+
 	def choose_input_dir(self) -> None:
 		directory = filedialog.askdirectory(title="Choose directory containing videos")
 		if directory:
@@ -541,7 +577,6 @@ class FrameExtractorApp(tk.Tk):
 		video_output_dir.mkdir(parents=True, exist_ok=True)
 
 		quality = self.jpeg_quality
-		capture_interval_seconds = self.capture_interval_seconds
 
 		self.after(0, self._log, f"[{video.name}] Extracting frames…")
 
@@ -561,11 +596,26 @@ class FrameExtractorApp(tk.Tk):
 		]
 
 		result = subprocess.run(cmd, capture_output=True, text=True)
-		if result.returncode != 0:
+		
+		if result.returncode != 0: 
 			raise RuntimeError(
 				f"{video.name}: "
 				f"{result.stderr.strip() or result.stdout.strip() or 'Unknown ffmpeg error'}"
 			)
+		
+		frame_count = len(list(video_output_dir.glob(f"{prefix}_*.jpg")))
+		
+		capture_interval_seconds = self._compute_capture_interval_from_file_times(
+			video,
+			frame_count,
+		)
+		
+		self.after(
+			0,
+			self._log,
+			f"[{video.name}] Computed capture interval: {capture_interval_seconds} seconds "
+			f"from file create/modified times and {frame_count} frames."
+		)
 
 		self.after(0, self._log, f"[{video.name}] Extracting GPS track…")
 		gpx_path = self._extract_gpx_track(video, video_output_dir)
