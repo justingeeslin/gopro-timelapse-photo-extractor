@@ -30,6 +30,9 @@ class FrameExtractorApp(tk.Tk):
 		# Processing configuration
 		self.jpeg_quality = 2
 		self.capture_interval_seconds = 0.5
+		
+		self.telemetry_script_path = Path(__file__).parent / "gopro-telemetry-json.js"
+		self.telemetry_match_tolerance_seconds = 0.5
 
 		# Immich configuration
 		self.immich_enabled = tk.BooleanVar(value=True)
@@ -380,7 +383,7 @@ class FrameExtractorApp(tk.Tk):
 				pass
 	
 		if value.endswith("Z"):
-			return datetime.fromisoformat(value.replace("Z", "+00:00")).replace(tzinfo=None)
+			return (datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone().replace(tzinfo=None))
 	
 		return datetime.fromisoformat(value)
 	
@@ -483,6 +486,7 @@ class FrameExtractorApp(tk.Tk):
 			tags = self._find_tags_for_datetime(frame_dt, tag_rows)
 	
 			if not tags:
+				self._log(f"No tags found for the date range. {frame_dt}")
 				continue
 	
 			cmd = [
@@ -491,6 +495,7 @@ class FrameExtractorApp(tk.Tk):
 			]
 	
 			for tag in tags:
+				self._log(f"Adding XMP tag; {tag}")
 				cmd.append(f"-XMP-dc:Subject+={tag}")
 				cmd.append(f"-XMP-lr:HierarchicalSubject+={tag}")
 	
@@ -503,6 +508,35 @@ class FrameExtractorApp(tk.Tk):
 					f"Failed to write XMP tags for {frame_file.name}: "
 					f"{result.stderr.strip() or result.stdout.strip()}"
 				)
+
+	def _extract_telemetry_csv(self, video_path: Path, output_dir: Path) -> Path:
+		telemetry_csv = output_dir / "telemetry.csv"
+		
+		if shutil.which("node") is None:
+			raise RuntimeError("Node.js is required to extract GoPro telemetry CSV.")
+		
+		if not self.telemetry_script_path.exists():
+			raise RuntimeError(f"Telemetry script not found: {self.telemetry_script_path}")
+		
+		cmd = [
+			"node",
+			str(self.telemetry_script_path),
+			str(video_path),
+			str(telemetry_csv),
+		]
+		
+		result = subprocess.run(cmd, capture_output=True, text=True)
+		
+		if result.returncode != 0:
+			raise RuntimeError(
+				f"Failed to extract telemetry CSV for {video_path.name}: "
+				f"{result.stderr.strip() or result.stdout.strip()}"
+			)
+		
+		if not telemetry_csv.exists() or telemetry_csv.stat().st_size == 0:
+			raise RuntimeError("Telemetry CSV extraction produced an empty file.")
+		
+		return telemetry_csv
 
 	def _find_immich_cli(self) -> str | None:
 		return shutil.which("immich")
@@ -622,6 +656,18 @@ class FrameExtractorApp(tk.Tk):
 
 		self.after(0, self._log, f"[{video.name}] Reading GPX start time…")
 		start_dt = self._get_gpx_start_datetime(gpx_path)
+		
+		self.after(0, self._log, f"[{video.name}] Extracting telemetry CSV…")
+		telemetry_csv = self._extract_telemetry_csv(video, video_output_dir)
+		
+		self.after(0, self._log, f"[{video.name}] Writing telemetry readings as XMP tags…")
+		self._write_xmp_tags_from_csv(
+			video_output_dir,
+			prefix,
+			start_dt,
+			capture_interval_seconds,
+			telemetry_csv,
+		)
 
 		self.after(0, self._log, f"[{video.name}] Writing photo timestamps…")
 		self._write_exif_timestamps(

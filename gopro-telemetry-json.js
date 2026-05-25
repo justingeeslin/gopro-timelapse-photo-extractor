@@ -8,7 +8,7 @@ const path = require("path");
 const inputPath = process.argv[2];
 
 if (!inputPath) {
-  console.error("Usage: node gopro-telemetry-json.js <video-file>");
+  console.error("Usage: node gopro-telemetry-json.js <video-file> <output-file>.telemetry.csv");
   process.exit(1);
 }
 
@@ -18,13 +18,17 @@ if (!fs.existsSync(inputPath)) {
 }
 
 const parsed = path.parse(inputPath);
-const outputPath = path.join(`${parsed.name}.telemetry.csv`);
+const outputPath = process.argv[3] || path.join(`${parsed.name}.telemetry.csv`);
 
 const file = fs.readFileSync(inputPath);
 
 function cleanHeader(header) {
-  // Remove everything before the last space or dash
-  return header.split(/[\s-]/).pop();
+  const dashIndex = header.indexOf("-");
+  if (dashIndex === -1) {
+	return header.trim();
+  }
+
+  return header.slice(dashIndex + 1).trim();
 }
 
 function parseCsv(csvText) {
@@ -71,6 +75,7 @@ function mergeTelemetryCsvStreams(csvByStream, joinKey = "cts") {
   const merged = new Map();
 
   for (const [streamName, csvText] of Object.entries(csvByStream)) {
+	const cleanStreamName = cleanHeader(streamName);
 	const rows = parseCsv(csvText);
 
 	for (const row of rows) {
@@ -89,7 +94,7 @@ function mergeTelemetryCsvStreams(csvByStream, joinKey = "cts") {
 
 	  for (const [col, value] of Object.entries(row)) {
 		if (col === joinKey || col === "date") continue;
-		outputRow[`${streamName}_${col}`] = value;
+		outputRow[`${cleanStreamName}_${col}`] = value;
 	  }
 	}
   }
