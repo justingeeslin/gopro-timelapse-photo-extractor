@@ -657,25 +657,33 @@ class FrameExtractorApp(tk.Tk):
 		self.after(0, self._log, f"[{video.name}] Reading GPX start time…")
 		start_dt = self._get_gpx_start_datetime(gpx_path)
 		
-		self.after(0, self._log, f"[{video.name}] Extracting telemetry CSV…")
-		telemetry_csv = self._extract_telemetry_csv(video, video_output_dir)
+		telemetry_csv = None
+		try:
+			self.after(0, self._log, f"[{video.name}] Extracting telemetry CSV…")
+			telemetry_csv = self._extract_telemetry_csv(video, video_output_dir)
+		except Exception as exc:
+			self.after(
+				0,
+				self._log,
+				f"[{video.name}] Telemetry CSV skipped: {exc}"
+			)
 		
-		self.after(0, self._log, f"[{video.name}] Writing telemetry readings as XMP tags…")
-		self._write_xmp_tags_from_csv(
-			video_output_dir,
-			prefix,
-			start_dt,
-			capture_interval_seconds,
-			telemetry_csv,
-		)
+		if telemetry_csv is not None:
+			self.after(0, self._log, f"[{video.name}] Writing telemetry readings as XMP tags…")
+			self._write_xmp_tags_from_csv(
+				video_output_dir,
+				prefix,
+				start_dt,
+				capture_interval_seconds,
+				telemetry_csv,
+			)
 
 		self.after(0, self._log, f"[{video.name}] Writing photo timestamps…")
 		self._write_exif_timestamps(
 			video_output_dir,
 			prefix,
 			start_dt,
-			capture_interval_seconds,
-		)
+			capture_interval_seconds,		)
 		
 		tags_csv = self.tags_csv_path.get().strip()
 		
